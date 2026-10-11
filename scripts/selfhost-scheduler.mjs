@@ -104,13 +104,15 @@ async function serveWithScheduler() {
   const port = process.env.PORT ?? "3001";
   scheduledUrl(port); // Validate before spawning anything.
   const stop = new AbortController();
+  // Docker binds 0.0.0.0 because Compose maps the port; bare-metal self-hosts
+  // set HOST (e.g. 127.0.0.1) to keep the unauthenticated app off the network.
   const preview = spawn(
     process.execPath,
     [
       "node_modules/vite/bin/vite.js",
       "preview",
       "--host",
-      "0.0.0.0",
+      process.env.HOST ?? "0.0.0.0",
       "--port",
       port,
       "--strictPort",
