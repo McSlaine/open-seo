@@ -148,8 +148,11 @@ function citationPill(label: string, url: string): boolean {
   }
 }
 
-/** Safe, de-duplicated cited URLs with tracking parameters removed. */
-function citationsFrom(list: unknown[]): AiCitation[] {
+/**
+ * Safe, de-duplicated cited URLs with tracking parameters removed. Shared by
+ * the DataForSEO parsers and the OpenAI-compatible provider.
+ */
+export function citationsFrom(list: unknown[]): AiCitation[] {
   const citations = new Map<string, AiCitation>();
   for (const item of list) {
     const source = sourceSchema.safeParse(item);

@@ -1,5 +1,5 @@
 import { AiVisibilityRepository as repo } from "../repositories/AiVisibilityRepository";
-import { getOptionalEnvValue } from "@/server/lib/runtime-env";
+import { isAiCollectionConfigured } from "../providers/openAiCompatibleAi";
 import {
   aiEngineUsesModelApi,
   AI_ENGINE_LABELS,
@@ -33,15 +33,14 @@ const AI_ENGINE_NOTES: Record<AiEngine, string> = {
 export async function getTracker(input: {
   projectId: string;
 }): Promise<AiTrackerState> {
-  const [config, competitors, recent, providerKey, project] = await Promise.all(
-    [
+  const [config, competitors, recent, providerConfigured, project] =
+    await Promise.all([
       repo.getConfiguration(input.projectId),
       repo.listCompetitors(input.projectId),
       repo.listRuns(input.projectId, 10),
-      getOptionalEnvValue("DATAFORSEO_API_KEY"),
+      isAiCollectionConfigured(),
       repo.getProject(input.projectId),
-    ],
-  );
+    ]);
   // A run whose workflow stopped is failed here, so it never looks stuck.
   const runs = await Promise.all(recent.map((run) => reconcileAiRun(run)));
   const [observations, answered] = await Promise.all([
@@ -60,7 +59,6 @@ export async function getTracker(input: {
     note: AI_ENGINE_NOTES[engine],
     modelApi: aiEngineUsesModelApi(engine),
   }));
-  const providerConfigured = !!providerKey;
   if (!config)
     return {
       configured: false,

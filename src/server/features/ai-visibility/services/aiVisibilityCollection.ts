@@ -22,6 +22,10 @@ import {
   parseLlmResponseAnswer,
   type ParsedAiAnswer,
 } from "../providers/dataforseoEvidence";
+import {
+  aiVisibilityProviderMode,
+  collectProviderAnswer,
+} from "../providers/openAiCompatibleAi";
 import { aiBrands } from "./aiVisibilityConfiguration";
 import { aiCostForAnswers } from "./aiVisibilityCost";
 import { matchAiBrand } from "./aiVisibilityMatching";
@@ -56,9 +60,11 @@ const LIVE_ANSWERS_PER_STEP = 6;
 /**
  * Marks the run running and groups its answers into batches. Manual and
  * baseline runs collect live answers so the user sees results sooner.
- * Scheduled runs use the cheaper standard queue. Claude and Perplexity have no
- * LLM Scraper, so every run asks their model API (`modelBatches`). Hosted runs
- * first check that credits cover the whole check, like rank checks.
+ * Scheduled runs use the cheaper standard queue. With the OpenAI-compatible
+ * provider every run collects live (its answers arrive synchronously), and
+ * Google AI Overviews — a SERP scrape with no model equivalent — fails its
+ * rows instead of stalling the run. Hosted runs first check that credits
+ * cover the whole check, like rank checks.
  */
 export async function prepareAiRun(
   runId: string,
@@ -72,10 +78,24 @@ export async function prepareAiRun(
   const run = await repo.getRunInternal(runId);
   if (!run || (run.status !== "queued" && run.status !== "running"))
     throw new AppError("NOT_FOUND", `Run ${runId} is no longer active.`);
-  const pending = (await repo.getObservations([runId])).filter(
+  let pending = (await repo.getObservations([runId])).filter(
     (row) => row.status === "pending",
   );
-  const live = run.trigger !== "scheduled";
+  const viaProvider =
+    (await aiVisibilityProviderMode()) === "openai_compatible";
+  if (viaProvider) {
+    const unsupported = pending.filter(
+      (row) => row.engine === "google_ai_overview",
+    );
+    if (unsupported.length)
+      await repo.failPendingObservations(
+        runId,
+        "Google AI Overviews needs DataForSEO; it is unavailable with AI_VISIBILITY_PROVIDER=openai_compatible.",
+        unsupported.map((row) => row.id),
+      );
+    pending = pending.filter((row) => row.engine !== "google_ai_overview");
+  }
+  const live = run.trigger !== "scheduled" || viaProvider;
   if (await isHostedServerAuthMode()) {
     const required = aiCostForAnswers(
       pending.map((row) => row.engine),
@@ -94,10 +114,12 @@ export async function prepareAiRun(
     locationCode: run.locationCode,
     languageCode: run.languageCode,
   };
-  const modelBatches = engineBatches(
-    pending.filter((row) => aiEngineUsesModelApi(row.engine)),
-    LIVE_ANSWERS_PER_STEP,
-  );
+  const modelBatches = viaProvider
+    ? []
+    : engineBatches(
+        pending.filter((row) => aiEngineUsesModelApi(row.engine)),
+        LIVE_ANSWERS_PER_STEP,
+      );
   const answers = pending.filter((row) => !aiEngineUsesModelApi(row.engine));
   if (live) {
     const tasks = answers.map((row) => ({
@@ -176,6 +198,8 @@ export async function collectAiLiveBatch(
 ) {
   const brands = await runBrands(runId);
   if (!brands) return;
+  if ((await aiVisibilityProviderMode()) === "openai_compatible")
+    return collectProviderLiveBatch(runId, market, tasks, brands);
   let settled: PromiseSettledResult<AiTrackingAnswer>[];
   try {
     settled = await createDataforseoClient(customer).aiSearch.trackingLiveBatch(
@@ -203,6 +227,51 @@ export async function collectAiLiveBatch(
     } catch (error) {
       console.error(
         `[ai-visibility] ${runId} could not save answer ${tasks[index].tag}:`,
+        error,
+      );
+    }
+  }
+}
+
+/**
+ * Provider live answers: one chat-completions call per task. Same contract as
+ * the DataForSEO live path — each answer is paid for when it arrives, so one
+ * failed save must not drop the rest, and a failed call fails only its own
+ * answer instead of the run.
+ */
+async function collectProviderLiveBatch(
+  runId: string,
+  market: AiRunMarket,
+  tasks: AiLiveTask[],
+  brands: AiBrand[],
+) {
+  const country = getIsoCountryCode(market.locationCode).toUpperCase();
+  const settled = await Promise.allSettled(
+    tasks.map((task) =>
+      collectProviderAnswer({
+        engine: task.engine,
+        prompt: task.prompt,
+        countryCode: country,
+      }),
+    ),
+  );
+  for (const [index, outcome] of settled.entries()) {
+    const task = tasks[index];
+    if (outcome.status === "rejected") {
+      await repo.failPendingObservations(
+        runId,
+        outcome.reason instanceof Error
+          ? outcome.reason.message
+          : String(outcome.reason),
+        [task.tag],
+      );
+      continue;
+    }
+    try {
+      await saveAiAnswer(task.tag, outcome.value, brands);
+    } catch (error) {
+      console.error(
+        `[ai-visibility] ${runId} could not save answer ${task.tag}:`,
         error,
       );
     }

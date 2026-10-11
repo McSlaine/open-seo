@@ -212,6 +212,33 @@ function checkOptionalFeatures(env: EnvRecord, items: PreflightItem[]): void {
         },
   );
 
+  const provider = get(env, "AI_VISIBILITY_PROVIDER");
+  if (provider && provider !== "dataforseo" && provider !== "openai_compatible")
+    items.push({
+      key: "ai",
+      name: "AI Visibility provider",
+      level: "fail",
+      message: `"${provider}" is not a valid AI_VISIBILITY_PROVIDER. Valid values: dataforseo (default), openai_compatible.`,
+    });
+  else if (provider === "openai_compatible")
+    items.push(
+      get(env, "AI_VISIBILITY_API_KEY")
+        ? {
+            key: "ai",
+            name: "AI Visibility provider",
+            level: "ok",
+            message:
+              "AI visibility answers collect via the OpenAI-compatible endpoint instead of DataForSEO. Google AI Overviews still needs DataForSEO.",
+          }
+        : {
+            key: "ai",
+            name: "AI Visibility provider",
+            level: "fail",
+            message:
+              "AI_VISIBILITY_PROVIDER=openai_compatible requires AI_VISIBILITY_API_KEY. Optional: AI_VISIBILITY_API_BASE and AI_VISIBILITY_MODEL_CHATGPT/GEMINI/CLAUDE/PERPLEXITY.",
+          },
+    );
+
   items.push(
     get(env, "CONTEXT_API_KEY")
       ? {

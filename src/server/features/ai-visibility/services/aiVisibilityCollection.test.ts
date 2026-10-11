@@ -11,7 +11,7 @@ import {
 } from "./aiVisibilityCollection";
 import { configuration, customer } from "./aiVisibilityTestFixtures";
 
-const { testDb, dataforseo } = await vi.hoisted(async () => {
+const { testDb, dataforseo, provider } = await vi.hoisted(async () => {
   const { createAiVisibilityTestDb } = await import("../aiVisibilityTestDb");
   return {
     testDb: await createAiVisibilityTestDb(),
@@ -20,6 +20,10 @@ const { testDb, dataforseo } = await vi.hoisted(async () => {
       trackingLiveBatch: vi.fn(),
       fetchTaskResult: vi.fn(),
       llmResponse: vi.fn(),
+    },
+    provider: {
+      aiVisibilityProviderMode: vi.fn(),
+      collectProviderAnswer: vi.fn(),
     },
   };
 });
@@ -43,11 +47,17 @@ vi.mock("@/server/lib/dataforseo", () => ({
 vi.mock("@/server/lib/dataforseo/llm-models", () => ({
   resolveLatestLlmModelName: async () => "claude-sonnet-5",
 }));
+vi.mock("../providers/openAiCompatibleAi", () => ({
+  aiVisibilityProviderMode: provider.aiVisibilityProviderMode,
+  collectProviderAnswer: provider.collectProviderAnswer,
+  isAiCollectionConfigured: async () => true,
+}));
 
 const runId = "run";
 const market = { locationCode: 2840, languageCode: "en" };
 
 beforeEach(async () => {
+  provider.aiVisibilityProviderMode.mockResolvedValue("dataforseo");
   await testDb.seedProject();
   await testDb.db.insert(projectCompetitors).values({
     id: "competitor",
@@ -315,6 +325,80 @@ describe("AI answer collection", () => {
     expect(await repo.getObservation("answer-1")).toMatchObject({
       status: "failed",
       error: "No answer arrived within the collection window.",
+    });
+  });
+});
+
+describe("OpenAI-compatible provider collection", () => {
+  it("collects every engine live, even scheduled, and fails Google AI Overviews", async () => {
+    provider.aiVisibilityProviderMode.mockResolvedValue("openai_compatible");
+    await repo.updateRun(runId, { trigger: "scheduled" });
+    const [{ promptId }] = await repo.getObservations([runId]);
+    await testDb.db.insert(aiObservations).values({
+      id: "answer-overview",
+      runId,
+      promptId,
+      engine: "google_ai_overview",
+      branded: false,
+    });
+
+    const plan = await prepareAiRun(runId, customer);
+
+    expect(plan.live).toBe(true);
+    expect(plan.modelBatches).toEqual([]);
+    expect(plan.batches.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ tag: "answer-0", engine: "chatgpt" }),
+        expect.objectContaining({ tag: "answer-1", engine: "chatgpt" }),
+      ]),
+    );
+    expect(plan.batches.flat()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ engine: "google_ai_overview" }),
+      ]),
+    );
+    expect(await repo.getObservation("answer-overview")).toMatchObject({
+      status: "failed",
+    });
+    expect(provider.collectProviderAnswer).not.toHaveBeenCalled();
+  });
+
+  it("saves provider answers and fails only the calls that error", async () => {
+    provider.aiVisibilityProviderMode.mockResolvedValue("openai_compatible");
+    provider.collectProviderAnswer
+      .mockResolvedValueOnce({
+        answerMarkdown: "Try OpenSEO.",
+        answerText: "Try OpenSEO.",
+        citations: [
+          {
+            url: "https://openseo.so/",
+            domain: "openseo.so",
+            title: "OpenSEO",
+            position: 1,
+          },
+        ],
+        collectedAt: null,
+      })
+      .mockRejectedValueOnce(new Error("HTTP 429: slow down"));
+
+    await collectAiLiveBatch(runId, customer, market, [
+      { tag: "answer-0", prompt: "Which SEO tools?", engine: "chatgpt" },
+      { tag: "answer-1", prompt: "Best rank tracker?", engine: "chatgpt" },
+    ]);
+
+    expect(provider.collectProviderAnswer).toHaveBeenCalledWith(
+      expect.objectContaining({ engine: "chatgpt", countryCode: "US" }),
+    );
+    expect(await repo.getObservation("answer-0")).toMatchObject({
+      status: "completed",
+      answerMarkdown: "Try OpenSEO.",
+    });
+    expect((await repo.getEvidence(["answer-0"])).sources).toMatchObject([
+      { url: "https://openseo.so/", domain: "openseo.so" },
+    ]);
+    expect(await repo.getObservation("answer-1")).toMatchObject({
+      status: "failed",
+      error: "HTTP 429: slow down",
     });
   });
 });
